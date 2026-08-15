@@ -164,8 +164,11 @@ def _pick_play(m: AccountMetrics, recoverable: bool) -> tuple[Play, str]:
 
 
 def next_best_actions(conn: Connection, today: date | None = None,
-                      limit: int | None = None) -> list[Action]:
-    metrics = compute_all(conn, today=today)
+                      limit: int | None = None,
+                      metrics: list[AccountMetrics] | None = None) -> list[Action]:
+    # Callers rendering several views share one metrics pass; recomputing it per
+    # view was the difference between a fast page and a timeout.
+    metrics = metrics if metrics is not None else compute_all(conn, today=today)
     max_arr = max((m.arr_at_risk for m in metrics), default=0.0) or 1.0
 
     actions: list[Action] = []
@@ -193,14 +196,15 @@ def next_best_actions(conn: Connection, today: date | None = None,
 # --------------------------------------------------------------------------
 
 
-def renewal_picture(conn: Connection, today: date | None = None) -> dict[str, Any]:
+def renewal_picture(conn: Connection, today: date | None = None,
+                    metrics: list[AccountMetrics] | None = None) -> dict[str, Any]:
     """Secure / at risk / lost, plus an honest note on what is not yet known.
 
     The forecast states its own blind spot rather than implying completeness:
     renewal dates live inside the renewal-tracker documents, so until extraction
     reaches those files the timing half of this is incomplete.
     """
-    metrics = compute_all(conn, today=today)
+    metrics = metrics if metrics is not None else compute_all(conn, today=today)
     buckets: dict[str, list[dict]] = {"lost": [], "at_risk": [], "watch": [], "secure": [],
                                       "pipeline": []}
 
@@ -247,14 +251,16 @@ def renewal_picture(conn: Connection, today: date | None = None) -> dict[str, An
     }
 
 
-def expansion_register(conn: Connection, today: date | None = None) -> dict[str, list[dict]]:
+def expansion_register(conn: Connection, today: date | None = None,
+                       metrics: list[AccountMetrics] | None = None) -> dict[str, list[dict]]:
     """Real opportunities versus the ones that only look like opportunities.
 
     A trap is an opportunity signal on an account whose fundamentals contradict
     it — the account has stopped flying, or already churned, or the CRM health
     label is the only thing holding the story up.
     """
-    metrics = {m.account_id: m for m in compute_all(conn, today=today)}
+    resolved = metrics if metrics is not None else compute_all(conn, today=today)
+    metrics = {m.account_id: m for m in resolved}
     real: list[dict] = []
     traps: list[dict] = []
 
