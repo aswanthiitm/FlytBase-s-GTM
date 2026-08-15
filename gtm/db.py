@@ -96,6 +96,17 @@ CREATE TABLE IF NOT EXISTS claims (
 CREATE INDEX IF NOT EXISTS idx_claims_account ON claims(account_id, status);
 CREATE INDEX IF NOT EXISTS idx_claims_doc ON claims(source_doc_id);
 
+-- L2 cache: which documents have been read, at which content hash. The join
+-- against documents.content_hash is what makes a re-poll cost nothing.
+CREATE TABLE IF NOT EXISTS extractions (
+    doc_id       TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    extracted_at TEXT NOT NULL,
+    claim_count  INTEGER NOT NULL DEFAULT 0,
+    model        TEXT,
+    PRIMARY KEY (doc_id, content_hash)
+);
+
 -- L3: per-account synthesis, versioned so we can show score movement.
 CREATE TABLE IF NOT EXISTS dossiers (
     account_id     TEXT NOT NULL,
