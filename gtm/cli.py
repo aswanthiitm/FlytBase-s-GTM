@@ -190,19 +190,48 @@ def poll(
     not anything changed, so 'the poller is alive but the data is quiet' is
     distinguishable from 'the poller died'.
     """
+    from gtm.db import is_postgres_url
+
     interval = every or config.POLL_SECONDS
+    src = source or config.SOURCE
+
+    # Fail loudly at startup on a misconfiguration, rather than looping on
+    # errors for hours and looking alive. An unattended poller that is quietly
+    # doing nothing is worse than one that never started.
+    if src == "flytbase" and not config.FLYTBASE_BASE_URL:
+        console.print("[red]FLYTBASE_BASE_URL is not set[/] — the poller has nothing "
+                      "to poll. Set it in the service variables.")
+        raise typer.Exit(1)
+
+    if not is_postgres_url(config.DB_TARGET):
+        console.print("[yellow]warning:[/] writing to a local SQLite file "
+                      f"({config.DB_TARGET}). On a deployed host this is wiped on "
+                      "redeploy, taking the change feed with it. Set DATABASE_URL.")
+
     conn = connect(config.DB_TARGET)
     adapter = _adapter(source)
-    console.print(f"[cyan]poller[/] source={adapter.name} every={interval}s db={config.DB_PATH}")
+    console.print(f"[cyan]poller[/] source={adapter.name} every={interval}s "
+                  f"store={conn.dialect}")
+    consecutive_failures = 0
     while True:
         try:
             delta = ingest(conn, adapter, trigger="poll")
+            consecutive_failures = 0
             if not delta.is_empty:
                 console.print(f"[green]{time.strftime('%H:%M:%S')}[/] {delta.summary()}")
             else:
                 console.print(f"[dim]{time.strftime('%H:%M:%S')} quiet[/]")
-        except Exception as exc:  # noqa: BLE001 - a poller must never die
-            console.print(f"[red]{time.strftime('%H:%M:%S')} poll failed:[/] {exc}")
+        except Exception as exc:  # noqa: BLE001 - a poller must never die on one bad pass
+            consecutive_failures += 1
+            console.print(f"[red]{time.strftime('%H:%M:%S')} poll #{consecutive_failures} "
+                          f"failed:[/] {type(exc).__name__}: {exc}")
+            # Never dying is right for a transient upstream blip and wrong for a
+            # bad credential — that just burns the window looking healthy. Exit
+            # non-zero so the platform's restart policy makes the failure visible.
+            if consecutive_failures >= 5:
+                console.print("[red]5 consecutive failures — exiting so the restart "
+                              "policy surfaces this instead of failing silently.[/]")
+                raise typer.Exit(1) from exc
         if once:
             return
         time.sleep(interval)
