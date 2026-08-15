@@ -41,6 +41,87 @@ def init():
     console.print(f"[green]ready[/] {config.DB_PATH}")
 
 
+ENV_PATH = config.ROOT / ".env"
+
+_KEY_HELP = {
+    "GROQ_API_KEY": "Groq API key — https://console.groq.com/keys (starts with gsk_)",
+    "FLYTBASE_API_KEY": "FlytBase Book of Business API key",
+    "FLYTBASE_BASE_URL": "FlytBase API origin only, e.g. https://example.com (no path)",
+}
+
+
+def _write_env(updates: dict[str, str]) -> None:
+    """Upsert keys into .env, preserving everything else and the file's order."""
+    lines = ENV_PATH.read_text().splitlines() if ENV_PATH.exists() else []
+    remaining = dict(updates)
+    out: list[str] = []
+    for line in lines:
+        name = line.split("=", 1)[0].strip().lstrip("#").strip() if "=" in line else ""
+        if name in remaining:
+            out.append(f"{name}={remaining.pop(name)}")
+        else:
+            out.append(line)
+    out.extend(f"{k}={v}" for k, v in remaining.items())
+    ENV_PATH.write_text("\n".join(out).rstrip() + "\n")
+    ENV_PATH.chmod(0o600)
+
+
+@app.command()
+def setkey(
+    name: str = typer.Option("GROQ_API_KEY", help="which key to set"),
+    value: str = typer.Option(None, help="skip the prompt and set it directly"),
+):
+    """Paste an API key into .env.
+
+    Input is hidden and never echoed, .env is gitignored, and the file is
+    chmod 600 after writing — so a key pasted here does not reach the repo or
+    your shell history.
+    """
+    name = name.upper()
+    if name in _KEY_HELP:
+        console.print(f"[dim]{_KEY_HELP[name]}[/]")
+
+    secret = value or typer.prompt(f"{name}", hide_input=not name.endswith("URL"))
+    secret = secret.strip().strip('"').strip("'")
+    if not secret:
+        console.print("[red]empty — nothing written[/]")
+        raise typer.Exit(1)
+
+    _write_env({name: secret})
+    shown = secret if name.endswith("URL") else f"{secret[:6]}…{secret[-4:]}"
+    console.print(f"[green]wrote[/] {name}={shown} → {ENV_PATH} (mode 600, gitignored)")
+
+    if name == "GROQ_API_KEY":
+        console.print("\nVerify it with: [bold]python -m gtm llmcheck[/]")
+
+
+@app.command()
+def llmcheck():
+    """Confirm the Groq key works, and show which models it can reach."""
+    from gtm.llm import DEFAULT_MODEL, LLMUnavailable, credentials_available, list_models
+
+    if not credentials_available():
+        console.print("[red]GROQ_API_KEY is not set.[/] Run [bold]python -m gtm setkey[/].")
+        raise typer.Exit(1)
+    try:
+        models = list_models()
+    except LLMUnavailable as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(1) from exc
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]Groq rejected the key:[/] {type(exc).__name__}: {exc}")
+        raise typer.Exit(1) from exc
+
+    console.print(f"[green]key works[/] — {len(models)} model(s) reachable\n")
+    for m in models:
+        marker = "  [green]<- GTM_MODEL[/]" if m == DEFAULT_MODEL else ""
+        console.print(f"  {m}{marker}")
+
+    if DEFAULT_MODEL not in models:
+        console.print(f"\n[yellow]GTM_MODEL is '{DEFAULT_MODEL}', which is not in that "
+                      "list.[/] Set GTM_MODEL in .env to one of the above.")
+
+
 @app.command("ingest")
 def ingest_cmd(
     source: str = typer.Option(None, help="fixture | flytbase"),
@@ -159,7 +240,7 @@ def extract(
     Only documents whose content hash has no recorded extraction are read, so
     re-running after a quiet poll costs nothing.
     """
-    from gtm.extract import anthropic_extractor, pending_documents, run_extraction
+    from gtm.extract import groq_extractor, pending_documents, run_extraction
     from gtm.llm import DEFAULT_MODEL, LLMUnavailable, credentials_available
 
     conn = connect(config.DB_PATH)
@@ -170,13 +251,13 @@ def extract(
         return
 
     if not credentials_available():
-        console.print(f"[yellow]{len(pending)} document(s) pending, but no Anthropic "
-                      "credential is available.[/]\nSet [bold]ANTHROPIC_API_KEY[/] in "
-                      ".env, or run [bold]ant auth login[/].")
+        console.print(f"[yellow]{len(pending)} document(s) pending, but GROQ_API_KEY "
+                      "is not set.[/]\nPaste your key into [bold].env[/] — run "
+                      "[bold]python -m gtm setkey[/] to do it interactively.")
         raise typer.Exit(1)
 
     try:
-        extractor = anthropic_extractor()
+        extractor = groq_extractor()
     except LLMUnavailable as exc:
         console.print(f"[red]extraction unavailable:[/] {exc}")
         raise typer.Exit(1) from exc

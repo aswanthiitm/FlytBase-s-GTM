@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Agentic GTM intelligence system over the FlytBase Book of Business"
 requires-python = ">=3.12"
 dependencies = [
-    "anthropic>=0.69",
+    "groq>=0.11",
     "httpx>=0.27",
     "pydantic>=2.7",
     "python-dotenv>=1.0",

@@ -112,7 +112,7 @@ def build_user_prompt(doc: sqlite3.Row) -> str:
 Extractor = Callable[[sqlite3.Row], ExtractionResult]
 
 
-def anthropic_extractor(client=None) -> Extractor:
+def groq_extractor(client=None) -> Extractor:
     from gtm.llm import get_client, parse_structured
 
     resolved = client or get_client()

@@ -115,15 +115,45 @@ high-volume step.
 
 ### Against the live API
 
+The Book of Business is **not a REST API** — it is an MCP server speaking
+JSON-RPC 2.0 over HTTP POST at a single endpoint. Two things cost real time to
+establish and are worth writing down:
+
+- **The API key already contains the `Bearer ` prefix.** Sending
+  `Authorization: Bearer <key>` produces `Bearer Bearer …` and a 401. The
+  adapter passes it through as-is unless it looks bare.
+- **The server is stateless** — `tools/call` works with no `initialize`
+  handshake and returns no session id.
+
+Tools the adapter uses: `list_accounts`, `list_account_documents`,
+`get_account_document`, `get_account_usage`.
+
 ```bash
-uv run python -m gtm probe --url <base-url> --key <api-key>
+uv run python -m gtm setkey --name FLYTBASE_API_KEY
 ```
 
-`probe` dumps the real response shapes so the adapter's field mapping is
-confirmed rather than guessed. Then set `GTM_SOURCE=flytbase` in `.env` and:
+```bash
+uv run python -m gtm ingest --source flytbase
+```
+
+A full portfolio pull is 14 accounts / 87 documents / 70 usage months in about
+three seconds. A second run reports `no changes`.
 
 ```bash
 uv run python -m gtm poll --every 300
+```
+
+### Setting keys
+
+Input is hidden, `.env` is gitignored and written mode 600, so a key pasted here
+reaches neither the repo nor your shell history.
+
+```bash
+uv run python -m gtm setkey
+```
+
+```bash
+uv run python -m gtm llmcheck
 ```
 
 ## Tests
