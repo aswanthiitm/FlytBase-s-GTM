@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -15,7 +16,10 @@ from gtm.ingest import ingest
 from gtm.sources.fixture import FixtureAdapter
 
 app = typer.Typer(add_completion=False, help="FlytBase GTM intelligence system")
-console = Console()
+
+# When stdout is piped (CI, a captured demo, `| less`) Rich falls back to 80
+# columns and mangles the wide tables. Use a readable fixed width off-tty.
+console = Console(width=None if sys.stdout.isatty() else 150)
 
 
 def _adapter(source: str | None = None, fixture_dir: Path | None = None):
@@ -146,6 +150,108 @@ def accounts():
 
 
 @app.command()
+def extract(
+    account: str = typer.Option(None, help="limit to one account"),
+    workers: int = typer.Option(6, help="parallel extraction workers"),
+):
+    """L2: read pending documents and persist evidence-backed claims.
+
+    Only documents whose content hash has no recorded extraction are read, so
+    re-running after a quiet poll costs nothing.
+    """
+    from gtm.extract import anthropic_extractor, pending_documents, run_extraction
+    from gtm.llm import DEFAULT_MODEL, LLMUnavailable, credentials_available
+
+    conn = connect(config.DB_PATH)
+    pending = pending_documents(conn, {account} if account else None)
+    if not pending:
+        console.print("[dim]nothing to extract — every active document is already "
+                      "read at its current hash[/]")
+        return
+
+    if not credentials_available():
+        console.print(f"[yellow]{len(pending)} document(s) pending, but no Anthropic "
+                      "credential is available.[/]\nSet [bold]ANTHROPIC_API_KEY[/] in "
+                      ".env, or run [bold]ant auth login[/].")
+        raise typer.Exit(1)
+
+    try:
+        extractor = anthropic_extractor()
+    except LLMUnavailable as exc:
+        console.print(f"[red]extraction unavailable:[/] {exc}")
+        raise typer.Exit(1) from exc
+
+    console.print(f"extracting {len(pending)} document(s) with {DEFAULT_MODEL}…")
+    report = run_extraction(conn, extractor, {account} if account else None,
+                            max_workers=workers, model_label=DEFAULT_MODEL)
+    console.print(f"[green]{report.summary()}[/]")
+
+    if report.rejections:
+        console.print("\n[yellow]rejected claims (evidence not found in source):[/]")
+        for claim_type, reason in report.rejections[:10]:
+            console.print(f"  {claim_type}: {reason}")
+    for doc_id, err in report.errors[:10]:
+        console.print(f"[red]failed[/] {doc_id}: {err}")
+
+
+@app.command()
+def claims(account: str, limit: int = 40):
+    """Every active claim for an account, with the quote behind it."""
+    from gtm.claims import active_claims
+
+    conn = connect(config.DB_PATH)
+    rows = active_claims(conn, account)
+    if not rows:
+        console.print("[dim]no active claims[/]")
+        return
+    t = Table("type", "subject", "claim", "evidence", "source")
+    for r in rows[:limit]:
+        t.add_row(r["claim_type"], r["subject"] or "-", r["value"],
+                  f'"{r["verbatim_quote"][:70]}"', f'{r["source_title"]} ({r["doc_date"]})')
+    console.print(t)
+
+
+_ARROW = {"growing": "[green]^[/]", "declining": "[red]v[/]", "stable": "[yellow]-[/]",
+          "dormant": "[red]X[/]", "insufficient_data": "[dim]?[/]", "no_data": "[dim].[/]"}
+
+
+@app.command()
+def metrics(account: str = typer.Option(None, help="limit to one account")):
+    """Deterministic metrics: usage trend, renewal countdown, divergences.
+
+    No LLM involved. These are the facts the reasoning layers are handed.
+    """
+    from gtm.metrics import compute, compute_all
+
+    conn = connect(config.DB_PATH)
+    rows = [compute(conn, account)] if account else compute_all(conn)
+
+    t = Table("account", "stage", "ARR", "health", "usage", "trend", "renewal", "last touch",
+              "flags")
+    for m in rows:
+        renewal = f"{m.days_to_renewal}d" if m.days_to_renewal is not None else "-"
+        touch = f"{m.days_since_last_touch}d ago" if m.days_since_last_touch is not None else "-"
+        flags = ", ".join(
+            f"[red]{d.kind}[/]" if d.severity == "high" else d.kind for d in m.divergences
+        ) or ""
+        t.add_row(m.name, m.stage or "-", f"{m.arr:,.0f}" if m.arr else "-",
+                  m.health_label or "-",
+                  f"{m.usage.latest_hours:g}h" if m.usage.months_observed else "-",
+                  _ARROW.get(m.usage.trend, "?"), renewal, touch, flags)
+    console.print(t)
+
+    flagged = [(m, d) for m in rows for d in m.divergences if d.severity == "high"]
+    if flagged:
+        console.print("\n[bold red]High-severity divergences[/]")
+        for m, d in flagged:
+            console.print(f"  [bold]{m.name}[/] — {d.detail}")
+
+    at_risk = sum(m.arr_at_risk for m in rows)
+    if at_risk:
+        console.print(f"\nARR at risk (weighted by severity): [bold]{at_risk:,.0f}[/]")
+
+
+@app.command()
 def doc(doc_id: str):
     """Show a stored document and its revision history."""
     conn = connect(config.DB_PATH)
@@ -173,31 +279,84 @@ def probe(url: str = typer.Option(None), key: str = typer.Option(None)):
     """
     import httpx
 
+    from gtm.sources.flytbase import ACCOUNTS_PATH
+
     base = (url or config.FLYTBASE_BASE_URL).rstrip("/")
     api_key = key or config.FLYTBASE_API_KEY
     if not base:
         raise typer.BadParameter("pass --url or set FLYTBASE_BASE_URL")
+
+    masked = f"{api_key[:4]}...{api_key[-4:]} (len {len(api_key)})" if api_key else "(none)"
+    console.print(f"base_url = [bold]{base}[/]\nkey      = {masked}\n")
+
+    def show(label: str, r: "httpx.Response") -> None:
+        ctype = r.headers.get("content-type", "?")
+        colour = "green" if r.status_code == 200 else "red"
+        console.print(f"[cyan]{label}[/] -> [{colour}]{r.status_code}[/] ({ctype})")
+        body = r.text
+        # Always show the body. An error body is the diagnostic -- servers say
+        # "missing api key" or "unknown account" in it, and swallowing that is
+        # what made the first probe useless.
+        snippet = body[:1200].strip()
+        if snippet:
+            console.print(f"[dim]{snippet}[/]")
+            if len(body) > 1200:
+                console.print(f"[dim]... {len(body)} bytes total[/]")
+        console.print()
+
+    # Step 1 -- is auth the problem? Compare header styles, including none.
+    console.print("[bold]— auth style —[/]")
+    variants: dict[str, dict[str, str]] = {"no auth": {}}
+    if api_key:
+        variants |= {
+            "Bearer": {"Authorization": f"Bearer {api_key}"},
+            "X-API-Key": {"X-API-Key": api_key},
+            "both": {"Authorization": f"Bearer {api_key}", "X-API-Key": api_key},
+            "?api_key=": {},
+        }
+    for label, hdrs in variants.items():
+        try:
+            with httpx.Client(base_url=base, timeout=30, follow_redirects=True) as c:
+                params = {"api_key": api_key} if label == "?api_key=" else None
+                r = c.get(ACCOUNTS_PATH, headers={"Accept": "application/json", **hdrs},
+                          params=params)
+            show(f"{ACCOUNTS_PATH} [{label}]", r)
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[red]{label} failed:[/] {type(exc).__name__}: {exc}\n")
+
+    # Step 2 -- path discovery. Root first: a 500 on *every* path usually means
+    # the base URL is wrong, not that all the paths are.
+    console.print("[bold]— path discovery —[/]")
     headers = {"Accept": "application/json"}
     if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-        headers["X-API-Key"] = api_key
-
+        headers |= {"Authorization": f"Bearer {api_key}", "X-API-Key": api_key}
+    candidates = ["/", "/api", "/api/accounts", "/accounts", "/api/v1/accounts",
+                  "/api/book-of-business", "/api/bob", "/api/portfolio",
+                  "/api/docs", "/openapi.json", "/api/openapi.json"]
+    ok_paths: list[str] = []
     with httpx.Client(base_url=base, headers=headers, timeout=30, follow_redirects=True) as c:
-        candidates = ["/api/accounts", "/accounts", "/api/v1/accounts",
-                      "/api/book-of-business", "/api"]
         for path in candidates:
             try:
                 r = c.get(path)
-                console.print(f"[cyan]GET {path}[/] -> {r.status_code} "
-                              f"({r.headers.get('content-type', '?')})")
                 if r.status_code == 200:
-                    body = r.text
-                    console.print(body[:2500])
-                    if len(body) > 2500:
-                        console.print(f"[dim]... {len(body)} bytes total[/]")
-                    break
+                    ok_paths.append(path)
+                    show(f"GET {path}", r)
+                else:
+                    console.print(f"[cyan]GET {path}[/] -> [red]{r.status_code}[/] "
+                                  f"[dim]{r.text[:200].strip()}[/]")
             except Exception as exc:  # noqa: BLE001
-                console.print(f"[red]GET {path} failed:[/] {exc}")
+                console.print(f"[red]GET {path} failed:[/] {type(exc).__name__}: {exc}")
+
+    console.print()
+    if ok_paths:
+        console.print(f"[green]reachable:[/] {', '.join(ok_paths)}")
+    else:
+        console.print("[yellow]nothing returned 200.[/] Most likely causes, in order: "
+                      "the base URL is not the API host (check for a /api prefix already "
+                      "baked into it, or a different subdomain); the key belongs in a "
+                      "header this probe did not try; or the endpoint needs a trailing "
+                      "slash. Send me the Book of Business page URL and I will read the "
+                      "documented shape instead of guessing.")
 
 
 @app.command()
