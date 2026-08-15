@@ -183,6 +183,8 @@ def poll(
     every: int = typer.Option(None, help="seconds between passes"),
     source: str = typer.Option(None),
     once: bool = typer.Option(False, help="run a single pass and exit"),
+    extract: bool = typer.Option(True, "--extract/--no-extract",
+                                 help="re-extract claims for accounts that changed"),
 ):
     """Continuously reconcile. This is the self-update loop.
 
@@ -210,8 +212,27 @@ def poll(
 
     conn = connect(config.DB_TARGET)
     adapter = _adapter(source)
+
+    # Build the extractor once. If no Groq credential is present the poller
+    # still runs — ingest and metrics do not need an LLM — it just says so
+    # rather than failing every cycle.
+    extractor = None
+    if extract:
+        from gtm.extract import groq_extractor, run_extraction
+        from gtm.llm import DEFAULT_MODEL, LLMUnavailable, credentials_available
+
+        if credentials_available():
+            try:
+                extractor = groq_extractor()
+            except LLMUnavailable as exc:
+                console.print(f"[yellow]extraction disabled:[/] {exc}")
+        else:
+            console.print("[yellow]extraction disabled:[/] GROQ_API_KEY is not set — "
+                          "ingest and metrics will still run.")
+
     console.print(f"[cyan]poller[/] source={adapter.name} every={interval}s "
-                  f"store={conn.dialect}")
+                  f"store={conn.dialect} "
+                  f"extract={'on:' + DEFAULT_MODEL if extractor else 'off'}")
     consecutive_failures = 0
     while True:
         try:
@@ -219,6 +240,22 @@ def poll(
             consecutive_failures = 0
             if not delta.is_empty:
                 console.print(f"[green]{time.strftime('%H:%M:%S')}[/] {delta.summary()}")
+
+                # Re-reason only the accounts that actually moved. This is the
+                # difference between a system that re-fetches and one that
+                # updates its own understanding — and scoping it to the delta is
+                # why the update costs seconds instead of a full re-read.
+                if extractor and delta.touched_accounts:
+                    try:
+                        report = run_extraction(conn, extractor, delta.touched_accounts,
+                                                model_label=DEFAULT_MODEL)
+                        if report.documents_considered:
+                            console.print(f"           extract: {report.summary()}")
+                    except Exception as exc:  # noqa: BLE001
+                        # A bad extraction must not stop ingestion; the documents
+                        # stay pending and the next cycle retries them.
+                        console.print(f"[yellow]           extract failed:[/] "
+                                      f"{type(exc).__name__}: {exc}")
             else:
                 console.print(f"[dim]{time.strftime('%H:%M:%S')} quiet[/]")
         except Exception as exc:  # noqa: BLE001 - a poller must never die on one bad pass
@@ -296,7 +333,7 @@ def accounts():
 @app.command()
 def extract(
     account: str = typer.Option(None, help="limit to one account"),
-    workers: int = typer.Option(6, help="parallel extraction workers"),
+    workers: int = typer.Option(2, help="parallel extraction workers"),
 ):
     """L2: read pending documents and persist evidence-backed claims.
 

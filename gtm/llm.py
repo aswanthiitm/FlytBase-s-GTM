@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
@@ -115,6 +116,31 @@ def _loads(text: str) -> Any:
 # --------------------------------------------------------------------------
 
 
+_RETRY_AFTER = re.compile(r"try again in ([\d.]+)s", re.IGNORECASE)
+
+# Groq's free tier is measured in tokens per minute, so a rate limit here is a
+# normal operating condition on a portfolio-sized backlog, not an error. Waiting
+# the advertised time and retrying is the correct response; failing the document
+# just pushes the same work to the next cycle.
+RATE_LIMIT_RETRIES = int(os.getenv("GTM_RATE_LIMIT_RETRIES", "3"))
+RATE_LIMIT_MAX_WAIT = float(os.getenv("GTM_RATE_LIMIT_MAX_WAIT", "70"))
+
+
+def _retry_after_seconds(exc: Exception) -> float | None:
+    """Prefer the server's own advice over a guessed backoff."""
+    header = getattr(getattr(exc, "response", None), "headers", None)
+    if header:
+        for key in ("retry-after", "x-ratelimit-reset-tokens"):
+            raw = header.get(key)
+            if raw:
+                try:
+                    return float(str(raw).rstrip("s"))
+                except ValueError:
+                    pass
+    match = _RETRY_AFTER.search(str(exc))
+    return float(match.group(1)) if match else None
+
+
 def _call(client, *, model: str, system: str, user: str, max_tokens: int,
           response_format: dict | None) -> str:
     kwargs: dict[str, Any] = {
@@ -128,8 +154,20 @@ def _call(client, *, model: str, system: str, user: str, max_tokens: int,
     }
     if response_format:
         kwargs["response_format"] = response_format
-    completion = client.chat.completions.create(**kwargs)
-    return completion.choices[0].message.content or ""
+
+    for attempt in range(RATE_LIMIT_RETRIES + 1):
+        try:
+            completion = client.chat.completions.create(**kwargs)
+            return completion.choices[0].message.content or ""
+        except Exception as exc:  # noqa: BLE001
+            is_rate_limit = (type(exc).__name__ == "RateLimitError"
+                             or getattr(exc, "status_code", None) == 429
+                             or "rate_limit" in str(exc).lower())
+            if not is_rate_limit or attempt == RATE_LIMIT_RETRIES:
+                raise
+            wait = _retry_after_seconds(exc) or (2.0 ** attempt)
+            time.sleep(min(wait + 0.5, RATE_LIMIT_MAX_WAIT))
+    raise AssertionError("unreachable")
 
 
 def _unsupported_format(exc: Exception) -> bool:

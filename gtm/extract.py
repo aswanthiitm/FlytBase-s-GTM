@@ -195,7 +195,7 @@ def run_extraction(
     conn: Connection,
     extractor: Extractor,
     account_ids: set[str] | None = None,
-    max_workers: int = 6,
+    max_workers: int = 2,
     model_label: str = "unknown",
 ) -> ExtractionReport:
     """Extract every pending document, in parallel, and persist the claims.
