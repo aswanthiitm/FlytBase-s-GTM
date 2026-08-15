@@ -393,7 +393,98 @@ def compute(conn: Connection, account_id: str, today: date | None = None) -> Acc
     return m
 
 
+def _assemble(row, raw, usage_rows, doc_counts, removed, claims_active,
+              claims_retracted, touches, today) -> AccountMetrics:
+    """Build one AccountMetrics from already-fetched data.
+
+    Shared by compute() and compute_all() so the per-account and bulk paths can
+    never drift apart in what they mean.
+    """
+    m = AccountMetrics(
+        account_id=row["account_id"], name=row["name"], stage=row["stage"],
+        arr=_money(_first(raw, ARR_KEYS)),
+        health_label=_first(raw, HEALTH_KEYS),
+        owner=_first(raw, OWNER_KEYS),
+    )
+    rd = parse_date(_first(raw, RENEWAL_KEYS))
+    if rd:
+        m.renewal_date = rd.isoformat()
+        m.days_to_renewal = (rd - today).days
+
+    m.usage = usage_trend(usage_rows)
+    m.doc_counts = dict(doc_counts)
+    m.active_docs = sum(doc_counts.values())
+    m.removed_docs = removed
+    m.active_claims = claims_active
+    m.retracted_claims = claims_retracted
+
+    for doc_id, doc_date in touches:
+        when = parse_date(doc_date)
+        if when:
+            m.last_touch_doc_id = doc_id
+            m.last_touch_date = when.isoformat()
+            m.days_since_last_touch = (today - when).days
+            break
+
+    m.divergences = divergences(m)
+    if m.arr:
+        worst = max((d.severity for d in m.divergences),
+                    key=lambda s: {"low": 1, "medium": 2, "high": 3}.get(s, 0), default=None)
+        weight = {"high": 1.0, "medium": 0.5, "low": 0.15}.get(worst or "", 0.0)
+        if m.usage.trend == "dormant":
+            weight = 1.0
+        m.arr_at_risk = round(m.arr * weight, 2)
+    return m
+
+
 def compute_all(conn: Connection, today: date | None = None) -> list[AccountMetrics]:
-    ids = [r["account_id"] for r in conn.execute(
-        "SELECT account_id FROM accounts WHERE status='active' ORDER BY account_id").fetchall()]
-    return [compute(conn, aid, today=today) for aid in ids]
+    """Six queries for the whole portfolio, not seven per account.
+
+    The per-account version issues ~7 round trips. Across fourteen accounts that
+    is ~98, and when the database is a continent away from the application each
+    one costs ~150ms — which turned a page load into fifteen seconds. Fetching in
+    bulk and grouping in Python makes the page independent of that latency.
+    """
+    today = today or date.today()
+
+    accounts = conn.execute(
+        "SELECT * FROM accounts WHERE status='active' ORDER BY account_id").fetchall()
+    if not accounts:
+        return []
+
+    usage: dict[str, list[dict]] = {}
+    for r in conn.execute("SELECT account_id, period, flight_hours, missions "
+                          "FROM usage_periods ORDER BY account_id, period").fetchall():
+        usage.setdefault(r["account_id"], []).append(dict(r))
+
+    doc_counts: dict[str, dict[str, int]] = {}
+    for r in conn.execute("SELECT account_id, doc_type, COUNT(*) n FROM documents "
+                          "WHERE status='active' GROUP BY account_id, doc_type").fetchall():
+        doc_counts.setdefault(r["account_id"], {})[r["doc_type"]] = r["n"]
+
+    removed: dict[str, int] = {
+        r["account_id"]: r["n"] for r in conn.execute(
+            "SELECT account_id, COUNT(*) n FROM documents WHERE status='removed' "
+            "GROUP BY account_id").fetchall()}
+
+    claims: dict[tuple[str, str], int] = {
+        (r["account_id"], r["status"]): r["n"] for r in conn.execute(
+            "SELECT account_id, status, COUNT(*) n FROM claims "
+            "GROUP BY account_id, status").fetchall()}
+
+    touches: dict[str, list[tuple]] = {}
+    for r in conn.execute(
+            "SELECT account_id, doc_id, doc_date FROM documents WHERE status='active' "
+            "AND doc_type IN ('transcript','email') AND doc_date IS NOT NULL "
+            "ORDER BY account_id, doc_date DESC").fetchall():
+        touches.setdefault(r["account_id"], []).append((r["doc_id"], r["doc_date"]))
+
+    out = []
+    for row in accounts:
+        aid = row["account_id"]
+        out.append(_assemble(
+            row, json.loads(row["raw_json"] or "{}"), usage.get(aid, []),
+            doc_counts.get(aid, {}), removed.get(aid, 0),
+            claims.get((aid, "active"), 0), claims.get((aid, "retracted"), 0),
+            touches.get(aid, []), today))
+    return out
