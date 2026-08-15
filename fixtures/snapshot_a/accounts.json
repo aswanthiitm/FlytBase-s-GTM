@@ -1,0 +1,4 @@
+[
+  {"account_id": "acct_demo_01", "name": "Northwind Utilities", "stage": "customer", "arr": 120000, "health": "green"},
+  {"account_id": "acct_demo_02", "name": "Cobalt Mining Co", "stage": "prospect", "arr": 0, "health": "unknown"}
+]
