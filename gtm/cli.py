@@ -275,6 +275,24 @@ def poll(
 
 
 @app.command()
+def serve(
+    host: str = typer.Option("0.0.0.0", help="bind address"),
+    port: int = typer.Option(None, help="defaults to $PORT, else 8000"),
+    poll_every: int = typer.Option(0, help="also poll in-process every N seconds "
+                                          "(0 = rely on the dedicated poller service)"),
+    source: str = typer.Option(None),
+):
+    """Serve the dashboard. Reads the store; runs no model at request time."""
+    import os
+
+    from gtm.server import serve as _serve
+
+    resolved = port or int(os.getenv("PORT", "8000"))
+    _serve(host=host, port=resolved, poll_interval=poll_every,
+           source=source or config.SOURCE)
+
+
+@app.command()
 def status():
     """Portfolio and pipeline state."""
     conn = connect(config.DB_TARGET)
