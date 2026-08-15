@@ -1,0 +1,29 @@
+{
+  "documents": [
+    {
+      "doc_id": "doc_a1",
+      "doc_type": "transcript",
+      "title": "QBR call - Feb",
+      "doc_date": "2026-02-11",
+      "body": "Priya Raman (Head of Inspections): we are flying two docks daily and want a third site by Q3."
+    },
+    {
+      "doc_id": "doc_a2",
+      "doc_type": "ticket",
+      "title": "P1 - dock offline",
+      "doc_date": "2026-03-02",
+      "body": "Dock 2 offline for 4 days. Customer escalated to their VP."
+    },
+    {
+      "doc_id": "doc_a3",
+      "doc_type": "note",
+      "title": "Internal - renewal risk",
+      "doc_date": "2026-03-05",
+      "body": "CSM notes account is green, but Priya has gone quiet since the P1."
+    }
+  ],
+  "usage": [
+    {"period": "2026-01", "flight_hours": 210.5, "missions": 180},
+    {"period": "2026-02", "flight_hours": 188.0, "missions": 160}
+  ]
+}

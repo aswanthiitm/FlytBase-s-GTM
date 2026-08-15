@@ -1,0 +1,23 @@
+[project]
+name = "flytbase-gtm"
+version = "0.1.0"
+description = "Agentic GTM intelligence system over the FlytBase Book of Business"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "python-dotenv>=1.0",
+    "typer>=0.12",
+    "rich>=13.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+# Flat layout, no build backend, no install step. `python -m gtm` works from the
+# repo root because the cwd is on sys.path. One less thing to go wrong in a
+# container, and it sidesteps a broken editable install on this machine.
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

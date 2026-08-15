@@ -1,0 +1,12 @@
+{
+  "documents": [
+    {
+      "doc_id": "doc_b1",
+      "doc_type": "email",
+      "title": "Pricing follow-up",
+      "doc_date": "2026-02-20",
+      "body": "Procurement asked for a 3-year term sheet. Security review still open."
+    }
+  ],
+  "usage": []
+}
