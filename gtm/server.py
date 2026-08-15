@@ -102,7 +102,7 @@ def _page(title, body, active=""):
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{escape(title)}</title><style>{CSS}</style></head><body>
-<header><h1>FlytBase GTM</h1><nav>{nav('/', 'Portfolio')}{nav('/feed', 'Change feed')}</nav></header>
+<header><h1>FlytBase GTM</h1><nav>{nav('/', 'Portfolio')}{nav('/actions', 'Priority queue')}{nav('/feed', 'Change feed')}</nav></header>
 <main>{body}</main>
 <footer>Read-only view of the store. Every figure was computed before this request —
 no model runs at page load.</footer></body></html>"""
@@ -265,6 +265,76 @@ def render_account(conn, account_id: str) -> str:
     return _page(f"{m.name} — FlytBase GTM", "".join(body))
 
 
+
+def render_actions(conn) -> str:
+    from gtm.portfolio import expansion_register, next_best_actions, renewal_picture
+
+    actions = [a for a in next_best_actions(conn) if a.play != "monitor"]
+    pic = renewal_picture(conn)
+    reg = expansion_register(conn)
+
+    body = ["<h2>What to do next</h2>",
+            "<div class='sub'>Ranked by a weighted score whose components are shown on every "
+            "row — a ranking you cannot argue with is one you can only believe. No model runs "
+            "in the ranking path.</div>"]
+
+    for i, a in enumerate(actions, 1):
+        cls = "hi" if a.score >= 50 else "med" if a.score >= 20 else "lo"
+        comps = " · ".join(f"{k.replace('_',' ')} {v:.0f}" for k, v in
+                           sorted(a.components.items(), key=lambda kv: -kv[1]))
+        reasons = "".join(f"<div class='muted' style='margin-top:2px'>· {escape(r)}</div>"
+                          for r in a.reasons)
+        ev = "".join(f'<div class="quote">\u201c{escape(e["verbatim_quote"][:200])}\u201d</div>'
+                     for e in a.evidence[:2])
+        body.append(
+            f'<div style="border-bottom:1px solid #21262d;padding:13px 0">'
+            f'<span class="pill {cls}">{a.score:.0f}</span> '
+            f'<b style="font-size:15px">{i}. <a href="/account/{escape(a.account_id)}">'
+            f'{escape(a.name)}</a></b> '
+            f'<span class="pill lo">{escape(a.play.replace("_"," "))}</span>'
+            + (f' <span class="muted">${a.arr:,.0f}</span>' if a.arr else "")
+            + f'<div style="margin-top:5px">{escape(a.headline)}</div>{reasons}{ev}'
+            f'<div class="muted mono" style="margin-top:5px;font-size:11.5px">'
+            f'score: {escape(comps)}</div></div>')
+
+    body.append("<h2>Renewal &amp; revenue picture</h2>")
+    body.append("<table><tr><th>Bucket</th><th class='num'>Accounts</th>"
+                "<th class='num'>ARR</th></tr>")
+    labels = {"secure": ("secure", "ok"), "watch": ("watch", "lo"),
+              "at_risk": ("at risk", "med"), "lost": ("lost", "hi"),
+              "pipeline": ("pipeline (no ARR yet)", "lo")}
+    for k, (label, cls) in labels.items():
+        body.append(f'<tr><td><span class="pill {cls}">{label}</span></td>'
+                    f'<td class="num">{len(pic["buckets"][k])}</td>'
+                    f'<td class="num">${pic["totals"][k]:,.0f}</td></tr>')
+    body.append("</table>")
+    body.append(f'<div class="sub" style="margin-top:10px">Live ARR '
+                f'<b>${pic["live_arr"]:,.0f}</b> · at-risk share '
+                f'<b style="color:#ff7b72">{pic["at_risk_share"]:.0%}</b></div>')
+    for c in pic["caveats"]:
+        body.append(f'<div class="warn" style="background:#3a2a12;border-color:#8a6420;'
+                    f'color:#e3b341">{escape(c)}</div>')
+
+    body.append("<h2>Expansion register</h2>")
+    body.append("<div class='sub'>Signals worth acting on, and signals whose account "
+                "fundamentals contradict them.</div>")
+    if reg["real"]:
+        for e in reg["real"]:
+            latent = (' <span class="pill lo">latent — growing usage nobody has acted on</span>'
+                      if e["latent"] else "")
+            body.append(f'<div class="evt"><span class="tag new">real</span>'
+                        f'<span><a href="/account/{escape(e["account_id"])}">'
+                        f'{escape(e["name"])}</a>{latent}</span></div>')
+    else:
+        body.append("<div class='sub'>No qualified expansion signals yet.</div>")
+    for e in reg["traps"]:
+        body.append(f'<div class="evt"><span class="tag rm">trap</span>'
+                    f'<span><a href="/account/{escape(e["account_id"])}">'
+                    f'{escape(e["name"])}</a> — {escape("; ".join(e["disqualifiers"]))}</span></div>')
+
+    return _page("Priority queue — FlytBase GTM", "".join(body), "priority queue")
+
+
 def render_feed(conn, limit=180) -> str:
     events = recent(conn, limit=limit)
     runs = conn.execute(
@@ -336,6 +406,8 @@ class Handler(BaseHTTPRequestHandler):
             conn = connect(config.DB_TARGET)
             if path == "/":
                 return self._send(200, render_portfolio(conn).encode())
+            if path == "/actions":
+                return self._send(200, render_actions(conn).encode())
             if path == "/feed":
                 return self._send(200, render_feed(conn).encode())
             if path.startswith("/account/"):
@@ -344,6 +416,11 @@ class Handler(BaseHTTPRequestHandler):
                 data = [m.to_dict() for m in compute_all(conn)]
                 return self._send(200, json.dumps(data, default=str).encode(),
                                   "application/json")
+            if path == "/api/actions":
+                from gtm.portfolio import next_best_actions
+                return self._send(200, json.dumps(
+                    [a.to_dict() for a in next_best_actions(conn)], default=str).encode(),
+                    "application/json")
             if path == "/api/feed":
                 return self._send(200, json.dumps(recent(conn, 200), default=str).encode(),
                                   "application/json")
