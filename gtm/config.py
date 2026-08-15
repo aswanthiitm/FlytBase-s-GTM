@@ -9,7 +9,12 @@ load_dotenv()
 
 ROOT = Path(__file__).resolve().parents[1]
 
-DB_PATH = Path(os.getenv("GTM_DB_PATH", ROOT / "data" / "gtm.db"))
+# DATABASE_URL wins when present — that is what Railway, Neon, and Supabase
+# inject. Falling back to a local SQLite file keeps tests and local runs offline.
+DB_TARGET = os.getenv("DATABASE_URL") or str(
+    Path(os.getenv("GTM_DB_PATH", ROOT / "data" / "gtm.db"))
+)
+DB_PATH = DB_TARGET  # backwards-compatible alias
 
 # Source selection: "flytbase" (live API) or "fixture" (local JSON, for tests
 # and for rehearsing the deletion path before it happens for real).

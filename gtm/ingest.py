@@ -14,9 +14,10 @@ gated on AccountSnapshot.complete.
 from __future__ import annotations
 
 import json
-import sqlite3
+from typing import Any
 
 from gtm.changefeed import emit
+from gtm.db import Connection
 from gtm.models import (
     AccountSnapshot,
     ClaimStatus,
@@ -29,16 +30,17 @@ from gtm.models import (
 from gtm.sources.base import SourceAdapter
 
 
-def start_run(conn: sqlite3.Connection, trigger: str, source: str) -> int:
-    cur = conn.execute(
-        "INSERT INTO ingest_runs (started_at, trigger, source) VALUES (?,?,?)",
-        (utcnow(), trigger, source),
+def start_run(conn: Connection, trigger: str, source: str) -> int:
+    run_id = conn.insert_returning(
+        "ingest_runs",
+        {"started_at": utcnow(), "trigger": trigger, "source": source},
+        returning="run_id",
     )
     conn.commit()
-    return int(cur.lastrowid)
+    return int(run_id)
 
 
-def finish_run(conn: sqlite3.Connection, run_id: int, delta: Delta, status: str, error: str | None = None) -> None:
+def finish_run(conn: Connection, run_id: int, delta: Delta, status: str, error: str | None = None) -> None:
     conn.execute(
         """UPDATE ingest_runs SET finished_at=?, status=?, docs_new=?, docs_changed=?,
            docs_removed=?, docs_restored=?, accounts_touched=?, error=? WHERE run_id=?""",
@@ -60,7 +62,7 @@ def finish_run(conn: sqlite3.Connection, run_id: int, delta: Delta, status: str,
 # --------------------------------------------------------------------------
 
 
-def _upsert_account(conn: sqlite3.Connection, acct: RawAccount, delta: Delta) -> None:
+def _upsert_account(conn: Connection, acct: RawAccount, delta: Delta) -> None:
     now = utcnow()
     fp = acct.fingerprint()
     row = conn.execute(
@@ -104,7 +106,7 @@ def _upsert_account(conn: sqlite3.Connection, acct: RawAccount, delta: Delta) ->
         conn.execute("UPDATE accounts SET last_seen_at=? WHERE account_id=?", (now, acct.account_id))
 
 
-def _upsert_documents(conn: sqlite3.Connection, snap: AccountSnapshot, delta: Delta) -> set[str]:
+def _upsert_documents(conn: Connection, snap: AccountSnapshot, delta: Delta) -> set[str]:
     """Insert/update documents. Returns the set of doc_ids seen this pass."""
     now = utcnow()
     seen: set[str] = set()
@@ -149,11 +151,10 @@ def _upsert_documents(conn: sqlite3.Connection, snap: AccountSnapshot, delta: De
                 (doc.body, fp, str(doc.doc_type), doc.title, doc.doc_date, rev, now, now,
                  json.dumps(doc.raw), doc.doc_id),
             )
-            conn.execute(
-                """INSERT OR REPLACE INTO document_versions
-                   (doc_id, revision, content_hash, body, captured_at) VALUES (?,?,?,?,?)""",
-                (doc.doc_id, rev, fp, doc.body, now),
-            )
+            conn.upsert("document_versions", {
+                "doc_id": doc.doc_id, "revision": rev, "content_hash": fp,
+                "body": doc.body, "captured_at": now,
+            }, pk=["doc_id", "revision"])
             reinstated = _reinstate_claims(conn, doc.doc_id, fp)
             delta.restored_docs.append(doc.doc_id)
             delta.touched_accounts.add(aid)
@@ -173,11 +174,10 @@ def _upsert_documents(conn: sqlite3.Connection, snap: AccountSnapshot, delta: De
                 (doc.body, fp, str(doc.doc_type), doc.title, doc.doc_date, rev, now, now,
                  json.dumps(doc.raw), doc.doc_id),
             )
-            conn.execute(
-                """INSERT OR REPLACE INTO document_versions
-                   (doc_id, revision, content_hash, body, captured_at) VALUES (?,?,?,?,?)""",
-                (doc.doc_id, rev, fp, doc.body, now),
-            )
+            conn.upsert("document_versions", {
+                "doc_id": doc.doc_id, "revision": rev, "content_hash": fp,
+                "body": doc.body, "captured_at": now,
+            }, pk=["doc_id", "revision"])
             # Claims were extracted from the *old* text; they no longer have a
             # verifiable source until re-extraction runs against the new body.
             stale = _retract_claims(
@@ -196,7 +196,7 @@ def _upsert_documents(conn: sqlite3.Connection, snap: AccountSnapshot, delta: De
     return seen
 
 
-def _reconcile_removals(conn: sqlite3.Connection, snap: AccountSnapshot,
+def _reconcile_removals(conn: Connection, snap: AccountSnapshot,
                         seen: set[str], delta: Delta) -> None:
     """Tombstone documents we hold but upstream no longer serves.
 
@@ -234,7 +234,7 @@ def _reconcile_removals(conn: sqlite3.Connection, snap: AccountSnapshot,
                  {"source_doc_id": row["doc_id"]})
 
 
-def _retract_claims(conn: sqlite3.Connection, doc_id: str, run_id: int,
+def _retract_claims(conn: Connection, doc_id: str, run_id: int,
                     account_id: str, reason: str, event: bool = True) -> int:
     cur = conn.execute(
         """UPDATE claims SET status='retracted', retracted_at=?, retraction_reason=?
@@ -248,7 +248,7 @@ def _retract_claims(conn: sqlite3.Connection, doc_id: str, run_id: int,
     return n
 
 
-def _reinstate_claims(conn: sqlite3.Connection, doc_id: str, content_hash: str) -> int:
+def _reinstate_claims(conn: Connection, doc_id: str, content_hash: str) -> int:
     """Reinstate only claims whose source text is byte-identical to what they
     were extracted from. If the document came back *edited*, the old claims stay
     retracted and re-extraction produces fresh ones."""
@@ -260,7 +260,7 @@ def _reinstate_claims(conn: sqlite3.Connection, doc_id: str, content_hash: str) 
     return cur.rowcount or 0
 
 
-def _upsert_usage(conn: sqlite3.Connection, snap: AccountSnapshot, delta: Delta) -> None:
+def _upsert_usage(conn: Connection, snap: AccountSnapshot, delta: Delta) -> None:
     now = utcnow()
     aid = snap.account.account_id
     for u in snap.usage:
@@ -303,7 +303,7 @@ def _upsert_usage(conn: sqlite3.Connection, snap: AccountSnapshot, delta: Delta)
 # --------------------------------------------------------------------------
 
 
-def ingest(conn: sqlite3.Connection, adapter: SourceAdapter, trigger: str = "manual") -> Delta:
+def ingest(conn: Connection, adapter: SourceAdapter, trigger: str = "manual") -> Delta:
     """Run one full reconciliation pass. Idempotent: a second run over an
     unchanged upstream produces an empty Delta and zero change events."""
     run_id = start_run(conn, trigger, adapter.name)

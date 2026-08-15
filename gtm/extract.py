@@ -11,14 +11,14 @@ whole pipeline is testable end to end without a credential.
 
 from __future__ import annotations
 
-import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Callable, Literal
+from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, Field
 
 from gtm.claims import PersistResult, persist_claims
+from gtm.db import Connection
 from gtm.models import Claim, utcnow
 
 ClaimType = Literal[
@@ -97,7 +97,7 @@ percentages. Quote the number as written and let deterministic code do the maths
 valid, useful answer. Do not manufacture claims to seem thorough."""
 
 
-def build_user_prompt(doc: sqlite3.Row) -> str:
+def build_user_prompt(doc: Any) -> str:
     return (
         f"Account: {doc['account_id']}\n"
         f"Document type: {doc['doc_type']}\n"
@@ -109,7 +109,7 @@ def build_user_prompt(doc: sqlite3.Row) -> str:
 
 
 # Extractor signature: takes a document row, returns the model's parsed result.
-Extractor = Callable[[sqlite3.Row], ExtractionResult]
+Extractor = Callable[[Any], ExtractionResult]
 
 
 def groq_extractor(client=None) -> Extractor:
@@ -117,7 +117,7 @@ def groq_extractor(client=None) -> Extractor:
 
     resolved = client or get_client()
 
-    def _extract(doc: sqlite3.Row) -> ExtractionResult:
+    def _extract(doc: Any) -> ExtractionResult:
         return parse_structured(
             resolved,
             system=EXTRACTION_SYSTEM,
@@ -159,8 +159,8 @@ class ExtractionReport:
 
 
 def pending_documents(
-    conn: sqlite3.Connection, account_ids: set[str] | None = None
-) -> list[sqlite3.Row]:
+    conn: Connection, account_ids: set[str] | None = None
+) -> list[Any]:
     """Active documents with no extraction recorded at their current hash.
 
     The hash join is the whole caching story: edit a document and it reappears
@@ -180,18 +180,19 @@ def pending_documents(
     return conn.execute(sql, params).fetchall()
 
 
-def _record_extraction(conn: sqlite3.Connection, doc: sqlite3.Row, n_claims: int,
+def _record_extraction(conn: Connection, doc: Any, n_claims: int,
                        model: str) -> None:
-    conn.execute(
-        """INSERT OR REPLACE INTO extractions
-           (doc_id, content_hash, extracted_at, claim_count, model)
-           VALUES (?,?,?,?,?)""",
-        (doc["doc_id"], doc["content_hash"], utcnow(), n_claims, model),
-    )
+    conn.upsert("extractions", {
+        "doc_id": doc["doc_id"],
+        "content_hash": doc["content_hash"],
+        "extracted_at": utcnow(),
+        "claim_count": n_claims,
+        "model": model,
+    }, pk=["doc_id", "content_hash"])
 
 
 def run_extraction(
-    conn: sqlite3.Connection,
+    conn: Connection,
     extractor: Extractor,
     account_ids: set[str] | None = None,
     max_workers: int = 6,
@@ -209,7 +210,7 @@ def run_extraction(
     if not docs:
         return report
 
-    def _safe(doc: sqlite3.Row):
+    def _safe(doc: Any):
         try:
             return doc, extractor(doc), None
         except Exception as exc:  # noqa: BLE001 - one bad document must not stop the run

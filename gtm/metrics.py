@@ -13,8 +13,9 @@ not caught up. `divergences()` is what finds those.
 from __future__ import annotations
 
 import json
-import sqlite3
 from dataclasses import asdict, dataclass, field
+
+from gtm.db import Connection
 from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
@@ -322,7 +323,7 @@ class AccountMetrics:
         return d
 
 
-def compute(conn: sqlite3.Connection, account_id: str, today: date | None = None) -> AccountMetrics:
+def compute(conn: Connection, account_id: str, today: date | None = None) -> AccountMetrics:
     today = today or date.today()
     row = conn.execute("SELECT * FROM accounts WHERE account_id=?", (account_id,)).fetchone()
     if row is None:
@@ -392,7 +393,7 @@ def compute(conn: sqlite3.Connection, account_id: str, today: date | None = None
     return m
 
 
-def compute_all(conn: sqlite3.Connection, today: date | None = None) -> list[AccountMetrics]:
+def compute_all(conn: Connection, today: date | None = None) -> list[AccountMetrics]:
     ids = [r["account_id"] for r in conn.execute(
         "SELECT account_id FROM accounts WHERE status='active' ORDER BY account_id").fetchall()]
     return [compute(conn, aid, today=today) for aid in ids]

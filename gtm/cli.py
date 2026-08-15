@@ -37,7 +37,7 @@ def _adapter(source: str | None = None, fixture_dir: Path | None = None):
 @app.command()
 def init():
     """Create the database and schema."""
-    connect(config.DB_PATH)
+    connect(config.DB_TARGET)
     console.print(f"[green]ready[/] {config.DB_PATH}")
 
 
@@ -96,6 +96,40 @@ def setkey(
 
 
 @app.command()
+def dbcheck():
+    """Confirm the store is reachable and report which dialect is in use."""
+    from gtm.db import connect, is_postgres_url
+
+    target = config.DB_TARGET
+    shown = target
+    if is_postgres_url(target):  # never print the password
+        import re
+
+        shown = re.sub(r"://([^:]+):[^@]+@", r"://\1:****@", target)
+    console.print(f"target: [bold]{shown}[/]")
+
+    try:
+        conn = connect(target)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]cannot connect:[/] {type(exc).__name__}: {exc}")
+        raise typer.Exit(1) from exc
+
+    console.print(f"dialect: [bold]{conn.dialect}[/]")
+    if conn.dialect == "sqlite":
+        console.print("[yellow]This is a local file.[/] On a deployed host the "
+                      "filesystem is wiped on redeploy, taking the change feed with "
+                      "it. Set DATABASE_URL to a postgres:// URL for the live store.")
+
+    counts = conn.execute("""
+        SELECT (SELECT COUNT(*) FROM accounts) AS accounts,
+               (SELECT COUNT(*) FROM documents WHERE status='active') AS documents,
+               (SELECT COUNT(*) FROM change_events) AS events,
+               (SELECT COUNT(*) FROM ingest_runs) AS runs
+    """).fetchone()
+    console.print(f"[green]connected[/] — " + ", ".join(f"{k}={counts[k]}" for k in counts.keys()))
+
+
+@app.command()
 def llmcheck():
     """Confirm the Groq key works, and show which models it can reach."""
     from gtm.llm import DEFAULT_MODEL, LLMUnavailable, credentials_available, list_models
@@ -129,7 +163,7 @@ def ingest_cmd(
     trigger: str = typer.Option("manual", help="manual | poll | cron"),
 ):
     """Run one reconciliation pass against the source."""
-    conn = connect(config.DB_PATH)
+    conn = connect(config.DB_TARGET)
     delta = ingest(conn, _adapter(source, fixture_dir), trigger=trigger)
     if delta.is_empty:
         console.print("[dim]no changes[/]")
@@ -157,7 +191,7 @@ def poll(
     distinguishable from 'the poller died'.
     """
     interval = every or config.POLL_SECONDS
-    conn = connect(config.DB_PATH)
+    conn = connect(config.DB_TARGET)
     adapter = _adapter(source)
     console.print(f"[cyan]poller[/] source={adapter.name} every={interval}s db={config.DB_PATH}")
     while True:
@@ -177,7 +211,7 @@ def poll(
 @app.command()
 def status():
     """Portfolio and pipeline state."""
-    conn = connect(config.DB_PATH)
+    conn = connect(config.DB_TARGET)
     run = conn.execute("SELECT * FROM ingest_runs ORDER BY run_id DESC LIMIT 1").fetchone()
     if run:
         colour = {"ok": "green", "partial": "yellow", "failed": "red"}.get(run["status"], "white")
@@ -201,7 +235,7 @@ def status():
 @app.command()
 def feed(limit: int = 25, account: str = typer.Option(None)):
     """The change feed -- what the system noticed, and when."""
-    conn = connect(config.DB_PATH)
+    conn = connect(config.DB_TARGET)
     rows = recent(conn, limit=limit, account_id=account)
     if not rows:
         console.print("[dim]no events yet[/]")
@@ -215,7 +249,7 @@ def feed(limit: int = 25, account: str = typer.Option(None)):
 @app.command()
 def accounts():
     """One line per account with document and usage counts."""
-    conn = connect(config.DB_PATH)
+    conn = connect(config.DB_TARGET)
     rows = conn.execute("""
         SELECT a.account_id, a.name, a.stage,
                (SELECT COUNT(*) FROM documents d WHERE d.account_id=a.account_id AND d.status='active') AS docs,
@@ -243,7 +277,7 @@ def extract(
     from gtm.extract import groq_extractor, pending_documents, run_extraction
     from gtm.llm import DEFAULT_MODEL, LLMUnavailable, credentials_available
 
-    conn = connect(config.DB_PATH)
+    conn = connect(config.DB_TARGET)
     pending = pending_documents(conn, {account} if account else None)
     if not pending:
         console.print("[dim]nothing to extract — every active document is already "
@@ -280,7 +314,7 @@ def claims(account: str, limit: int = 40):
     """Every active claim for an account, with the quote behind it."""
     from gtm.claims import active_claims
 
-    conn = connect(config.DB_PATH)
+    conn = connect(config.DB_TARGET)
     rows = active_claims(conn, account)
     if not rows:
         console.print("[dim]no active claims[/]")
@@ -304,7 +338,7 @@ def metrics(account: str = typer.Option(None, help="limit to one account")):
     """
     from gtm.metrics import compute, compute_all
 
-    conn = connect(config.DB_PATH)
+    conn = connect(config.DB_TARGET)
     rows = [compute(conn, account)] if account else compute_all(conn)
 
     t = Table("account", "stage", "ARR", "health", "usage", "trend", "renewal", "last touch",
@@ -335,7 +369,7 @@ def metrics(account: str = typer.Option(None, help="limit to one account")):
 @app.command()
 def doc(doc_id: str):
     """Show a stored document and its revision history."""
-    conn = connect(config.DB_PATH)
+    conn = connect(config.DB_TARGET)
     d = conn.execute("SELECT * FROM documents WHERE doc_id=?", (doc_id,)).fetchone()
     if not d:
         raise typer.Exit(f"no such document: {doc_id}")
@@ -444,7 +478,7 @@ def probe(url: str = typer.Option(None), key: str = typer.Option(None)):
 def export(out: Path = typer.Option(Path("data/export.json"))):
     """Dump the whole store as JSON -- feeds the dashboard and makes the state
     inspectable without a SQLite client."""
-    conn = connect(config.DB_PATH)
+    conn = connect(config.DB_TARGET)
     payload = {
         table: [dict(r) for r in conn.execute(f"SELECT * FROM {table}").fetchall()]
         for table in ("accounts", "documents", "usage_periods", "claims", "change_events",

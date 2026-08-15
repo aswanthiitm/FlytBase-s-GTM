@@ -1,0 +1,9 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# A poller that dies silently is the single worst failure mode here: the change
+# feed just stops and nothing says so. Always restart.
+restartPolicyType = "always"
+restartPolicyMaxRetries = 100
