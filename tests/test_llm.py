@@ -131,3 +131,49 @@ def test_json_word_present_for_json_mode():
     client = FakeGroq(['{"items": []}'])
     _parse(client)
     assert "json" in client.calls[0]["messages"][0]["content"].lower()
+
+
+# -------------------------------------------------------- rate limiting
+
+
+class RateLimited(Exception):
+    """Mimics groq.RateLimitError closely enough for the detector."""
+
+    def __init__(self, msg):
+        super().__init__(msg)
+        self.status_code = 429
+
+
+RateLimited.__name__ = "RateLimitError"
+
+
+def test_rate_limit_waits_the_advertised_time_then_succeeds(monkeypatch):
+    """Groq's free tier is tokens-per-minute, so a 429 on a portfolio-sized
+    backlog is normal operation, not an error. Honour the server's own advice."""
+    slept: list[float] = []
+    monkeypatch.setattr("gtm.llm.time.sleep", lambda s: slept.append(s))
+
+    client = FakeGroq([
+        RateLimited("rate_limit_exceeded ... Please try again in 4.5s"),
+        '{"items": []}',
+    ])
+    assert _parse(client).items == []
+    assert slept and 4.5 <= slept[0] <= 6.0  # advertised wait, small margin
+
+
+def test_rate_limit_gives_up_after_the_retry_budget(monkeypatch):
+    monkeypatch.setattr("gtm.llm.time.sleep", lambda s: None)
+    client = FakeGroq([RateLimited("rate_limit_exceeded try again in 1s")] * 12)
+    with pytest.raises(Exception, match="rate_limit"):
+        _parse(client)
+
+
+def test_rate_limit_is_not_mistaken_for_an_unsupported_format(monkeypatch):
+    """A 429 must not silently downgrade the response format — that would hide
+    a quota problem as a capability problem."""
+    monkeypatch.setattr("gtm.llm.time.sleep", lambda s: None)
+    client = FakeGroq([RateLimited("rate_limit_exceeded try again in 1s")] * 12)
+    with pytest.raises(Exception):
+        _parse(client)
+    # Every attempt kept the strict format; no fallback to json_object.
+    assert all(c["response_format"]["type"] == "json_schema" for c in client.calls)
