@@ -16,7 +16,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY gtm ./gtm
 COPY fixtures ./fixtures
 
-# Default to the poller: this image's whole job is to keep the store current
-# without anyone touching it. Railway's per-service start command overrides
-# this when the same image also serves the dashboard.
-CMD ["python", "-m", "gtm", "poll", "--every", "300", "--source", "flytbase"]
+# One image, two roles, dispatched on an explicit variable rather than on a
+# per-service start command — so the role a container is playing is visible in
+# its own environment instead of buried in host settings.
+#   GTM_ROLE=web   -> dashboard
+#   anything else  -> poller (the default, because keeping the store current
+#                     unattended is this image's primary job)
+CMD ["sh", "-c", "if [ \"$GTM_ROLE\" = web ]; then exec python -m gtm serve; else exec python -m gtm poll --every ${GTM_POLL_SECONDS:-300} --source ${GTM_SOURCE:-flytbase}; fi"]
