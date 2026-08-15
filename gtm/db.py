@@ -247,9 +247,21 @@ class Connection:
 # --------------------------------------------------------------------------
 
 
-def connect(target: str | Path | None = None) -> Connection:
+# Which targets this process has already created the schema for. Running ~25 DDL
+# statements on every connection is invisible on SQLite and brutal on Postgres —
+# it was costing seconds per dashboard request, since each request opens its own
+# connection. The DDL is CREATE ... IF NOT EXISTS, so doing it once per process
+# is sufficient.
+_schema_ready: set[str] = set()
+
+
+def connect(target: str | Path | None = None, ensure_schema: bool | None = None) -> Connection:
     """Open the store. A postgres:// URL selects Postgres; anything else is
-    treated as a SQLite file path."""
+    treated as a SQLite file path.
+
+    `ensure_schema` defaults to "once per target per process". Pass True to
+    force it (tests with a fresh temp database each time).
+    """
     target = str(target if target is not None else
                  os.getenv("DATABASE_URL") or os.getenv("GTM_DB_PATH", "data/gtm.db"))
 
@@ -273,6 +285,10 @@ def connect(target: str | Path | None = None) -> Connection:
         raw.executescript("PRAGMA journal_mode=WAL;\nPRAGMA foreign_keys=ON;")
         conn = Connection(raw, "sqlite")
 
-    conn.executescript(_schema(conn.is_postgres))
-    conn.commit()
+    if ensure_schema is None:
+        ensure_schema = target not in _schema_ready
+    if ensure_schema:
+        conn.executescript(_schema(conn.is_postgres))
+        conn.commit()
+        _schema_ready.add(target)
     return conn

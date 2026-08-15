@@ -269,9 +269,12 @@ def render_account(conn, account_id: str) -> str:
 def render_actions(conn) -> str:
     from gtm.portfolio import expansion_register, next_best_actions, renewal_picture
 
-    actions = [a for a in next_best_actions(conn) if a.play != "monitor"]
-    pic = renewal_picture(conn)
-    reg = expansion_register(conn)
+    from gtm.metrics import compute_all
+
+    shared = compute_all(conn)  # one pass, three views
+    actions = [a for a in next_best_actions(conn, metrics=shared) if a.play != "monitor"]
+    pic = renewal_picture(conn, metrics=shared)
+    reg = expansion_register(conn, metrics=shared)
 
     body = ["<h2>What to do next</h2>",
             "<div class='sub'>Ranked by a weighted score whose components are shown on every "
