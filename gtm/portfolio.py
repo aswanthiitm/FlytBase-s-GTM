@@ -59,6 +59,27 @@ class Action:
         }
 
 
+def _claims_by_account(conn: Connection, types: tuple[str, ...]) -> dict[str, list[dict]]:
+    """One query for the whole portfolio, grouped in Python.
+
+    Same reason as compute_all: a query per account is a query per account times
+    the round-trip cost, and the database is not necessarily next door.
+    """
+    marks = ",".join("?" * len(types))
+    rows = conn.execute(
+        f"""SELECT c.account_id, c.claim_type, c.subject, c.value, c.verbatim_quote,
+                   c.doc_date, d.title AS source_title
+            FROM claims c JOIN documents d ON d.doc_id = c.source_doc_id
+            WHERE c.status='active' AND c.claim_type IN ({marks})
+            ORDER BY c.account_id, c.doc_date DESC""",
+        list(types),
+    ).fetchall()
+    out: dict[str, list[dict]] = {}
+    for r in rows:
+        out.setdefault(r["account_id"], []).append(dict(r))
+    return out
+
+
 def _claims(conn: Connection, account_id: str, types: tuple[str, ...]) -> list[dict]:
     marks = ",".join("?" * len(types))
     rows = conn.execute(
@@ -171,10 +192,12 @@ def next_best_actions(conn: Connection, today: date | None = None,
     metrics = metrics if metrics is not None else compute_all(conn, today=today)
     max_arr = max((m.arr_at_risk for m in metrics), default=0.0) or 1.0
 
+    by_account = _claims_by_account(
+        conn, ("churn_reason", "opportunity", "renewal_signal", "blocker"))
+
     actions: list[Action] = []
     for m in metrics:
-        churn_claims = _claims(conn, m.account_id,
-                               ("churn_reason", "opportunity", "renewal_signal", "blocker"))
+        churn_claims = by_account.get(m.account_id, [])
         recoverable, hits = _recoverable_churn(churn_claims) if "churn" in (m.stage or "").lower() \
             else (False, [])
 
@@ -263,10 +286,12 @@ def expansion_register(conn: Connection, today: date | None = None,
     metrics = {m.account_id: m for m in resolved}
     real: list[dict] = []
     traps: list[dict] = []
+    opps_by = _claims_by_account(conn, ("opportunity",))
+    blockers_by = _claims_by_account(conn, ("blocker", "objection", "risk"))
 
     for aid, m in metrics.items():
-        opps = _claims(conn, aid, ("opportunity",))
-        blockers = _claims(conn, aid, ("blocker", "objection", "risk"))
+        opps = opps_by.get(aid, [])
+        blockers = blockers_by.get(aid, [])
         stage = (m.stage or "").lower()
 
         disqualifiers: list[str] = []
