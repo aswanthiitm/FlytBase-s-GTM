@@ -451,6 +451,62 @@ def metrics(account: str = typer.Option(None, help="limit to one account")):
 
 
 @app.command()
+def actions(limit: int = typer.Option(10, help="how many to show")):
+    """The next-best-action queue: what to do, for which account, and why."""
+    from gtm.portfolio import next_best_actions
+
+    conn = connect(config.DB_TARGET)
+    for i, a in enumerate(next_best_actions(conn, limit=limit), 1):
+        colour = "red" if a.score >= 50 else "yellow" if a.score >= 20 else "dim"
+        console.print(f"[{colour}]{i}. [{a.score:5.1f}][/] [bold]{a.name}[/] "
+                      f"[cyan]{a.play}[/]"
+                      + (f"  ${a.arr:,.0f}" if a.arr else ""))
+        console.print(f"      {a.headline}")
+        for r in a.reasons:
+            console.print(f"      [dim]·[/] {r}")
+        for e in a.evidence[:2]:
+            console.print(f'      [dim]“{e["verbatim_quote"][:88]}”[/]')
+        console.print()
+
+
+@app.command()
+def renewals():
+    """Renewal and revenue picture, with its own blind spots stated."""
+    from gtm.portfolio import renewal_picture
+
+    conn = connect(config.DB_TARGET)
+    p = renewal_picture(conn)
+    t = Table("bucket", "accounts", "ARR")
+    for k in ("secure", "watch", "at_risk", "lost", "pipeline"):
+        t.add_row(k, str(len(p["buckets"][k])), f'{p["totals"][k]:,.0f}')
+    console.print(t)
+    console.print(f'\nlive ARR [bold]{p["live_arr"]:,.0f}[/] · '
+                  f'at-risk share [bold red]{p["at_risk_share"]:.0%}[/]')
+    for c in p["caveats"]:
+        console.print(f"[yellow]caveat:[/] {c}")
+
+
+@app.command()
+def expansion():
+    """Real expansion opportunities, and the ones that only look like it."""
+    from gtm.portfolio import expansion_register
+
+    conn = connect(config.DB_TARGET)
+    reg = expansion_register(conn)
+    console.print("[bold green]Real opportunities[/]")
+    for e in reg["real"] or []:
+        tag = " [dim](latent — growing usage nobody has acted on)[/]" if e["latent"] else ""
+        console.print(f'  {e["name"]} — {e["trend"]}{tag}')
+    if not reg["real"]:
+        console.print("  [dim]none[/]")
+    console.print("\n[bold red]Traps[/]")
+    for e in reg["traps"] or []:
+        console.print(f'  {e["name"]} — {"; ".join(e["disqualifiers"])}')
+    if not reg["traps"]:
+        console.print("  [dim]none[/]")
+
+
+@app.command()
 def doc(doc_id: str):
     """Show a stored document and its revision history."""
     conn = connect(config.DB_TARGET)
