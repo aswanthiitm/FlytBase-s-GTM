@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -20,6 +21,10 @@ app = typer.Typer(add_completion=False, help="FlytBase GTM intelligence system")
 # When stdout is piped (CI, a captured demo, `| less`) Rich falls back to 80
 # columns and mangles the wide tables. Use a readable fixed width off-tty.
 console = Console(width=None if sys.stdout.isatty() else 150)
+
+# How many pending documents one quiet cycle may claim. Small enough that a
+# backlog pass cannot starve the next real delta of rate-limit headroom.
+BACKLOG_DOCS = int(os.environ.get("GTM_BACKLOG_DOCS", "6"))
 
 
 def _adapter(source: str | None = None, fixture_dir: Path | None = None):
@@ -258,6 +263,25 @@ def poll(
                                       f"{type(exc).__name__}: {exc}")
             else:
                 console.print(f"[dim]{time.strftime('%H:%M:%S')} quiet[/]")
+
+                # A quiet poll is still a chance to clear the extraction backlog.
+                # Without this, a portfolio that never changes never gets read at
+                # all — the store fills with documents and no evidence. Bounded
+                # per cycle so one pass cannot monopolise the rate limit.
+                if extractor:
+                    try:
+                        from gtm.extract import pending_documents
+
+                        pending = pending_documents(conn)
+                        if pending:
+                            batch = {d["account_id"] for d in pending[:BACKLOG_DOCS]}
+                            report = run_extraction(conn, extractor, batch,
+                                                    model_label=DEFAULT_MODEL)
+                            console.print(f"           backlog: {report.summary()} "
+                                          f"({len(pending)} were pending)")
+                    except Exception as exc:  # noqa: BLE001
+                        console.print(f"[yellow]           backlog failed:[/] "
+                                      f"{type(exc).__name__}: {exc}")
         except Exception as exc:  # noqa: BLE001 - a poller must never die on one bad pass
             consecutive_failures += 1
             console.print(f"[red]{time.strftime('%H:%M:%S')} poll #{consecutive_failures} "
