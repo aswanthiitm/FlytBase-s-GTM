@@ -13,9 +13,9 @@ metric for the prompt, and a non-zero one is worth reporting honestly.
 from __future__ import annotations
 
 import re
-import sqlite3
 from dataclasses import dataclass, field
 
+from gtm.db import Connection
 from gtm.models import Claim, utcnow
 
 
@@ -41,7 +41,7 @@ class PersistResult:
         return self.rejected / self.attempted if self.attempted else 0.0
 
 
-def persist_claims(conn: sqlite3.Connection, claims: list[Claim]) -> PersistResult:
+def persist_claims(conn: Connection, claims: list[Claim]) -> PersistResult:
     res = PersistResult()
     now = utcnow()
 
@@ -86,7 +86,7 @@ def persist_claims(conn: sqlite3.Connection, claims: list[Claim]) -> PersistResu
     return res
 
 
-def active_claims(conn: sqlite3.Connection, account_id: str) -> list[dict]:
+def active_claims(conn: Connection, account_id: str) -> list[dict]:
     rows = conn.execute(
         """SELECT c.*, d.title AS source_title, d.doc_type AS source_type
            FROM claims c JOIN documents d ON d.doc_id = c.source_doc_id
@@ -96,7 +96,7 @@ def active_claims(conn: sqlite3.Connection, account_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def claim_set_hash(conn: sqlite3.Connection, account_id: str) -> str:
+def claim_set_hash(conn: Connection, account_id: str) -> str:
     """Fingerprint of an account's active evidence. If this is unchanged, the
     account's synthesis cannot have changed, so L3 skips it -- this is what
     makes the 4:30 re-run cost pennies instead of a full portfolio re-read."""

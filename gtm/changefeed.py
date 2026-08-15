@@ -8,14 +8,14 @@ changed, and which document caused it. Rows are written once and never mutated.
 from __future__ import annotations
 
 import json
-import sqlite3
 from typing import Any
 
+from gtm.db import Connection
 from gtm.models import EventType, utcnow
 
 
 def emit(
-    conn: sqlite3.Connection,
+    conn: Connection,
     run_id: int | None,
     event_type: EventType | str,
     account_id: str | None,
@@ -32,7 +32,7 @@ def emit(
     )
 
 
-def recent(conn: sqlite3.Connection, limit: int = 50, account_id: str | None = None) -> list[dict]:
+def recent(conn: Connection, limit: int = 50, account_id: str | None = None) -> list[dict]:
     if account_id:
         rows = conn.execute(
             "SELECT * FROM change_events WHERE account_id=? ORDER BY event_id DESC LIMIT ?",

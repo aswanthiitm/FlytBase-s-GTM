@@ -1,0 +1,11 @@
+# Container dependency set. Kept as a plain requirements file for two reasons:
+# the Dockerfile installs from it, and if a host ever falls back to Nixpacks,
+# `pip install -r requirements.txt` succeeds where `pip install .` cannot —
+# this project is a flat layout with no build backend on purpose.
+groq>=0.11
+psycopg[binary]>=3.2
+httpx>=0.27
+pydantic>=2.7
+python-dotenv>=1.0
+typer>=0.12
+rich>=13.7
